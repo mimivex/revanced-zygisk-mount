@@ -1,6 +1,6 @@
 {
-	"version": "v13",
-	"versionCode": 13,
-	"zipUrl": "https://github.com/shamrat05/rvmm-zygisk-mount/releases/latest/download/rvmm-zygisk-mount-v13.zip",
-	"changelog": "https://raw.githubusercontent.com/shamrat05/rvmm-zygisk-mount/master/README.md"
+	"version": "v1",
+	"versionCode": 1,
+	"zipUrl": "https://github.com/mimivex/revanced-zygisk-mount/releases/latest/download/revanced-zygisk-mount.zip",
+	"changelog": "https://raw.githubusercontent.com/mimivex/revanced-zygisk-mount/master/README.md"
 }

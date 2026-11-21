@@ -1,7 +1,7 @@
-id=rvmm-zygisk-mount
-name=rvmm-zygisk-mount
-version=v13
-versionCode=13
-author=j-hc
-description=Mounts the RVMM (revanced-magisk-module) modules with Zygisk
-updateJson=https://raw.githubusercontent.com/shamrat05/rvmm-zygisk-mount/master/update.json
+id=revanced-zygisk-mount
+name=revanced-zygisk-mount
+version=v1
+versionCode=1
+author=mimivex
+description=Hides the bind mounts of modules created by the official ReVanced Manager. Needs Zygisk.
+updateJson=https://raw.githubusercontent.com/mimivex/revanced-zygisk-mount/master/update.json

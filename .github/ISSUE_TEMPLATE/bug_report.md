@@ -7,10 +7,12 @@ assignees: ''
 
 ---
 
-**Android version and ROM:**
+**Android version, ROM and root solution (Magisk/KernelSU/Kitsune, Zygisk provider):**
 
-**Logs taken with `su -c logcat -d -s "rvmm-zygisk-mount"`:**
+**The app and the version of the patched APK installed by ReVanced Manager:**
 
-**rvmm-zygisk-mount module flash logs:**
+**Logs taken with `su -c logcat -d -s "revanced-zygisk-mount"`:**
+
+**revanced-zygisk-mount module flash logs:**
 
 Not providing any of these information will get your issue closed without any response!

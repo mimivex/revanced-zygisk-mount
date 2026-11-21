@@ -1,0 +1,4 @@
+# Android's sh chokes on CRLF shebangs and commands.
+* text=auto eol=lf
+*.so binary
+*.apk binary

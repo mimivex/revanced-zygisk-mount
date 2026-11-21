@@ -2,9 +2,9 @@
 /*.c
 policy
 *.zip
-*.so
+*.sha256
 *.log
 .pytest_cache/
 __pycache__/
 .clangd
-module/bin/*/ksu_profile
+dev/

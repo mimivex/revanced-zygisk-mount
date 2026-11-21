@@ -14,7 +14,7 @@
 
 #define ARR_LEN(a) (sizeof(a) / (sizeof((a)[0])))
 #define LOGD(fmt, ...) \
-    __android_log_print(ANDROID_LOG_DEBUG, "rvmm-zygisk-mount", "[%d] " fmt, __LINE__, ##__VA_ARGS__)
+    __android_log_print(ANDROID_LOG_DEBUG, "revanced-zygisk-mount", "[%d] " fmt, __LINE__, ##__VA_ARGS__)
 
 static bool readFull(int fd, void* data, size_t size) {
     auto* ptr = static_cast<char*>(data);
@@ -61,7 +61,7 @@ static bool sendProcInfo(int fd, const char* proc) {
     return true;
 }
 
-class RVMMZygiskMount : public zygisk::ModuleBase {
+class RevancedZygiskMount : public zygisk::ModuleBase {
    public:
     void onLoad(zygisk::Api* api, JNIEnv* env) override {
         this->api = api;
@@ -138,7 +138,7 @@ static char* readFileToNullStr(const char* path) {
 
     int fd = open(path, O_RDONLY);
     if (fd == -1) {
-        LOGD("ERROR open: %s", strerror(errno));
+        LOGD("ERROR open %s: %s", path, strerror(errno));
         goto defer;
     }
 
@@ -148,7 +148,7 @@ static char* readFileToNullStr(const char* path) {
         goto defer;
     }
     if (st.st_size <= 0) {
-        LOGD("ERROR size=%d", (int)st.st_size);
+        LOGD("ERROR %s is empty (size=%d)", path, (int)st.st_size);
         goto defer;
     }
 
@@ -171,12 +171,72 @@ defer:
     return buf;
 }
 
+static pid_t parentPid(pid_t pid) {
+    char path[64];
+    snprintf(path, ARR_LEN(path), "/proc/%d/status", pid);
+
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd == -1) return -1;
+
+    char buf[1024];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    buf[n] = 0;
+
+    char* ppid = strstr(buf, "\nPPid:");
+    return ppid ? static_cast<pid_t>(atoi(ppid + 6)) : -1;
+}
+
+// Zygisk runs preAppSpecialize before zygote finishes specializing the
+// process, so when the request arrives the app still shares zygote's mount
+// namespace. A bind mounted there is copied into every process zygote starts
+// afterwards, and the app itself can miss it if it unshares first. Wait
+// until the process has a namespace of its own before mounting into it.
+static bool waitForPrivateMountNamespace(pid_t pid) {
+    char ns_path[64];
+    snprintf(ns_path, ARR_LEN(ns_path), "/proc/%d/ns/mnt", pid);
+
+    pid_t ppid = parentPid(pid);
+    if (ppid <= 0) return false;
+
+    char parent_ns_path[64];
+    snprintf(parent_ns_path, ARR_LEN(parent_ns_path), "/proc/%d/ns/mnt", ppid);
+
+    struct stat parent_ns;
+    if (stat(parent_ns_path, &parent_ns) == -1) return false;
+
+    // Specialization takes milliseconds. A second is already generous, and
+    // the companion waits on its own: the app is not blocked by this.
+    for (int i = 0; i < 1000; i++) {
+        struct stat ns;
+        if (stat(ns_path, &ns) == -1) {
+            if (errno == ENOENT) return false;
+        } else if (ns.st_dev != parent_ns.st_dev || ns.st_ino != parent_ns.st_ino) {
+            return true;
+        }
+        usleep(1000);
+    }
+    return false;
+}
+
 static bool injectMount(const char* src, const char* dst, pid_t pid) {
-    // int ns_fd = syscall(SYS_pidfd_open, pid, 0);
-    // if (ns_fd == -1) {
-    //     LOGD("ERROR pidfd_open: %s", strerror(errno));
-    //     return false;
-    // }
+    if (!waitForPrivateMountNamespace(pid)) {
+        LOGD("ERROR pid=%d never left the zygote mount namespace; not mounting", pid);
+        return false;
+    }
+
+    // The companion was spawned by the engine daemon, so the namespace it
+    // starts in is the one the engine runs in. Remember it: the bind must
+    // not be created there, or every process started afterwards would
+    // inherit it. The wait above can only be fooled by an engine whose
+    // daemon lives in a namespace of its own, and in that case skipping the
+    // mount is better than exposing it.
+    struct stat start_ns;
+    if (stat("/proc/self/ns/mnt", &start_ns) == -1) {
+        LOGD("ERROR stat self namespace: %s", strerror(errno));
+        return false;
+    }
 
     char ns_path[64];
     snprintf(ns_path, ARR_LEN(ns_path), "/proc/%d/ns/mnt", pid);
@@ -193,6 +253,22 @@ static bool injectMount(const char* src, const char* dst, pid_t pid) {
         LOGD("ERROR setns: %s", strerror(errno));
         return false;
     }
+
+    struct stat now_ns;
+    if (stat("/proc/self/ns/mnt", &now_ns) == -1) {
+        LOGD("ERROR stat self namespace: %s", strerror(errno));
+        return false;
+    }
+    if (now_ns.st_dev == start_ns.st_dev && now_ns.st_ino == start_ns.st_ino) {
+        LOGD("ERROR pid=%d is still in the namespace this companion started in; not mounting", pid);
+        return false;
+    }
+
+    // unshare keeps the propagation flags, so make this namespace a slave of
+    // its parent before mounting: the bind must not travel back to zygote if
+    // the ROM left the mount shared. A namespace that is already slave is
+    // unaffected.
+    mount(NULL, "/", NULL, MS_REC | MS_SLAVE, NULL);
 
     if (mount(src, dst, NULL, MS_BIND, NULL) != 0) {
         LOGD("ERROR mount: %s", strerror(errno));
@@ -220,8 +296,11 @@ static bool receiveProcInfo(int fd, char** src, char** dst, pid_t* pid) {
         return false;
     }
 
-    char* procs_map = readFileToNullStr("/data/adb/modules/rvmm-zygisk-mount/procs_map");
-    if (procs_map == nullptr) return false;
+    char* procs_map = readFileToNullStr("/data/adb/modules/revanced-zygisk-mount/procs_map");
+    if (procs_map == nullptr) {
+        LOGD("procs_map is missing or empty, nothing can be mounted");
+        return false;
+    }
 
     const char *mapped_src, *mapped_dst;
     bool r = getMountSrcDst(procs_map, proc.data(), &mapped_src, &mapped_dst);
@@ -237,6 +316,8 @@ static bool receiveProcInfo(int fd, char** src, char** dst, pid_t* pid) {
         }
     }
     free(procs_map);
+    // Zygisk calls us for every app process, so a miss just means this one
+    // is not patched. Stay quiet.
     if (!r) return false;
 
     LOGD("%s: %s -> %s", proc.data(), *src, *dst);
@@ -246,15 +327,12 @@ static bool receiveProcInfo(int fd, char** src, char** dst, pid_t* pid) {
 static void companionHandler(int fd) {
     char *src = nullptr, *dst = nullptr;
     pid_t pid;
-    if (!receiveProcInfo(fd, &src, &dst, &pid)) {
-        LOGD("invalid or incomplete companion request");
-        return;
-    }
+    if (!receiveProcInfo(fd, &src, &dst, &pid)) return;
 
     pid_t child = fork();
     if (child == 0) {
         bool ok = injectMount(src, dst, pid);
-        LOGD("mount %s -> %s for pid=%d: %s", src, dst, pid, ok ? "success" : strerror(errno));
+        LOGD("mount %s -> %s for pid=%d: %s", src, dst, pid, ok ? "success" : "failed");
         _exit(ok ? 0 : 1);
     } else if (child == -1) {
         LOGD("ERROR fork: %s", strerror(errno));
@@ -263,5 +341,5 @@ static void companionHandler(int fd) {
     free(dst);
 }
 
-REGISTER_ZYGISK_MODULE(RVMMZygiskMount)
+REGISTER_ZYGISK_MODULE(RevancedZygiskMount)
 REGISTER_ZYGISK_COMPANION(companionHandler)
